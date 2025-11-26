@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>手势粒子(手机版)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; touch-action: none; }
+        
+        #input_video { position: absolute; top: 0; left: 0; opacity: 0; pointer-events: none; width: 1px; height: 1px; }
+        
+        /* 移动端 UI - 底部布局 */
+        #ui-container {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(20, 20, 30, 0.6);
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            padding: 15px;
+            border-radius: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: white;
+            width: 85%;
+            max-width: 400px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            transition: all 0.3s ease;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .row { display: flex; justify-content: space-between; align-items: center; }
+
+        /* 大按钮适合手指点击 */
+        .shape-btn {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            color: white;
+            padding: 12px 0;
+            border-radius: 12px;
+            margin: 0 4px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .shape-btn.active { background: #4f7aff; box-shadow: 0 4px 12px rgba(79, 122, 255, 0.4); }
+
+        /* 状态条 */
+        #status-bar {
+            font-size: 12px;
+            color: rgba(255,255,255,0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0,0,0,0.2);
+            padding: 6px;
+            border-radius: 20px;
+        }
+        .dot { width: 8px; height: 8px; background: #ff4444; border-radius: 50%; margin-right: 6px; transition: background 0.3s; }
+        .dot.active { background: #00ff88; box-shadow: 0 0 8px #00ff88; }
+
+        /* Loading */
+        #loading {
+            position: absolute;
+            top: 40%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 16px;
+            text-align: center;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .spinner {
+            width: 30px; height: 30px; border: 3px solid rgba(255,255,255,0.3);
+            border-top: 3px solid white; border-radius: 50%;
+            animation: spin 1s linear infinite; margin: 0 auto 10px auto;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        
+        /* 颜色选择器覆盖 */
+        #color-wrapper {
+            width: 30px; height: 30px; border-radius: 50%; overflow: hidden; border: 2px solid rgba(255,255,255,0.2);
+            position: relative;
+        }
+        input[type="color"] {
+            position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
+            cursor: pointer; border: none; padding: 0; margin: 0;
+        }
+
+    </style>
+</head>
+<body>
+
+    <video id="input_video" playsinline webkit-playsinline></video>
+
+    <div id="loading">
+        <div class="spinner"></div>
+        <div>加载 AI 模型中...<br><span style="font-size:12px;opacity:0.7">首次加载约需 10秒</span></div>
+    </div>
+
+    <div id="ui-container">
+        <div class="row">
+            <div id="status-bar">
+                <div class="dot" id="status-dot"></div>
+                <span id="status-text">开启摄像头权限以交互</span>
+            </div>
+            <div id="color-wrapper">
+                <input type="color" id="colorPicker" value="#4f7aff">
+            </div>
+        </div>
+
+        <div class="row">
+            <button class="shape-btn active" onclick="setShape('fireworks', this)">🎆 烟花</button>
+            <button class="shape-btn" onclick="setShape('heart', this)">❤️ 爱心</button>
+            <button class="shape-btn" onclick="setShape('flower', this)">🌸 花朵</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script>
+        // --- 1. Three.js 初始化 ---
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x000000, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 35; // 手机屏幕小，稍微拉远一点
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 限制DPI以提升性能
+        document.body.appendChild(renderer.domElement);
+
+        // --- 2. 粒子系统 (降低数量以适应手机) ---
+        const particleCount = 6000; // 手机端降至6000
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(particleCount * 3);
+        const targetPositions = new Float32Array(particleCount * 3);
+        
+        for(let i = 0; i < particleCount * 3; i++) {
+            positions[i] = (Math.random() - 0.5) * 50;
+            targetPositions[i] = positions[i];
+        }
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+        const material = new THREE.PointsMaterial({
+            color: 0x4f7aff,
+            size: 0.3, // 稍微调大一点点
+            transparent: true,
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending
+        });
+
+        const particles = new THREE.Points(geometry, material);
+        scene.add(particles);
+
+        // --- 3. 形状算法 ---
+        function getPointOnSphere() {
+            const r = 10 + Math.random() * 2;
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            return { x: r * Math.sin(phi) * Math.cos(theta), y: r * Math.sin(phi) * Math.sin(theta), z: r * Math.cos(phi) };
+        }
+        function getPointOnHeart() {
+            let t = Math.random() * Math.PI * 2;
+            let r = Math.sqrt(Math.random()) * 0.8; 
+            let x = 16 * Math.pow(Math.sin(t), 3);
+            let y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+            let z = (Math.random() - 0.5) * 4;
+            return { x: x * r, y: y * r, z: z };
+        }
+        function getPointOnFlower() {
+            const rBase = 12;
+            const theta = Math.random() * Math.PI * 2;
+            const r = (Math.sin(theta * 5) * 4 + rBase) * Math.sqrt(Math.random());
+            return { x: r * Math.cos(theta), y: r * Math.sin(theta), z: (Math.random() - 0.5) * 2 + Math.sin(r) * 2 };
+        }
+
+        // 修复后的切换函数：直接传入点击的元素 btnElement
+        function setShape(shape, btnElement) {
+            
+            // 更新UI
+            if (btnElement) {
+                document.querySelectorAll('.shape-btn').forEach(btn => btn.classList.remove('active'));
+                btnElement.classList.add('active');
+            }
+
+            // 更新位置
+            for(let i = 0; i < particleCount; i++) {
+                let p;
+                if (shape === 'heart') p = getPointOnHeart();
+                else if (shape === 'flower') p = getPointOnFlower();
+                else p = getPointOnSphere();
+
+                targetPositions[i * 3] = p.x;
+                targetPositions[i * 3 + 1] = p.y;
+                targetPositions[i * 3 + 2] = p.z;
+            }
+        }
+        
+        setShape('fireworks', null); // 初始化
+
+        // --- 4. 颜色与触控 ---
+        document.getElementById('colorPicker').addEventListener('input', (e) => {
+            material.color.set(e.target.value);
+        });
+
+        // 触摸旋转逻辑
+        let touchX = 0, touchY = 0;
+        let targetRotationX = 0, targetRotationY = 0;
+
+        document.addEventListener('touchstart', (e) => {
+            touchX = e.touches[0].clientX;
+            touchY = e.touches[0].clientY;
+        }, {passive: false});
+
+        document.addEventListener('touchmove', (e) => {
+            // 阻止默认滚动
+            e.preventDefault(); 
+            const deltaX = e.touches[0].clientX - touchX;
+            const deltaY = e.touches[0].clientY - touchY;
+            
+            targetRotationY += deltaX * 0.005;
+            targetRotationX += deltaY * 0.005;
+            
+            touchX = e.touches[0].clientX;
+            touchY = e.touches[0].clientY;
+        }, {passive: false});
+
+        // --- 5. MediaPipe 手势 (针对手机优化) ---
+        let handOpenness = 0;
+        let isHandDetected = false;
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const loadingDiv = document.getElementById('loading');
+        const videoElement = document.getElementById('input_video');
+
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 0, // 手机端使用 Lite 模型 (0) 提高性能
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults((results) => {
+            loadingDiv.style.display = 'none';
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                isHandDetected = true;
+                statusDot.classList.add('active');
+                statusText.innerText = "手势已连接";
+                
+                const landmarks = results.multiHandLandmarks[0];
+                const thumbTip = landmarks[4];
+                const indexTip = landmarks[8];
+                
+                // 手机竖屏时，X坐标可能需要调整，但相对距离算法通用
+                const distance = Math.sqrt(Math.pow(thumbTip.x - indexTip.x, 2) + Math.pow(thumbTip.y - indexTip.y, 2));
+                
+                let rawOpenness = (distance - 0.03) * 6; // 调整敏感度参数
+                handOpenness += (Math.max(0, Math.min(1, rawOpenness)) - handOpenness) * 0.1;
+            } else {
+                isHandDetected = false;
+                statusDot.classList.remove('active');
+                statusText.innerText = "请将手放入画面";
+                handOpenness += (0.5 - handOpenness) * 0.05;
+            }
+        });
+
+        // 手机摄像头配置：优先使用前置 (user)
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 480, // 降低分辨率以提速
+            height: 640,
+            facingMode: 'user' 
+        });
+        cameraUtils.start();
+
+        // --- 6. 动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 粒子变形与呼吸
+            const positionsArray = geometry.attributes.position.array;
+            let scaleFactor = isHandDetected ? 0.5 + (handOpenness * 2.5) : 1 + Math.sin(Date.now() * 0.002) * 0.2;
+
+            // 平滑旋转
+            particles.rotation.y += (targetRotationY - particles.rotation.y) * 0.1;
+            particles.rotation.x += (targetRotationX - particles.rotation.x) * 0.1;
+            // 自动微旋转
+            targetRotationY += 0.001;
+
+            for(let i = 0; i < particleCount; i++) {
+                const px = i * 3;
+                const py = i * 3 + 1;
+                const pz = i * 3 + 2;
+                
+                // 目标位置
+                const tx = targetPositions[px] * scaleFactor;
+                const ty = targetPositions[py] * scaleFactor;
+                const tz = targetPositions[pz] * scaleFactor;
+
+                positionsArray[px] += (tx - positionsArray[px]) * 0.08;
+                positionsArray[py] += (ty - positionsArray[py]) * 0.08;
+                positionsArray[pz] += (tz - positionsArray[pz]) * 0.08;
+            }
+            geometry.attributes.position.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
